@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autocad-com-mcp"
+version = "0.1.0"
+description = "MCP server for controlling a running AutoCAD via Windows COM (no plugin, no restart)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "CurtainWallAI" }]
+keywords = ["autocad", "mcp", "com", "activex", "cad", "automation"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: Microsoft :: Windows",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = [
+  "mcp>=1.0.0",
+  "pywin32>=306; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+autocad-com-mcp = "autocad_com_mcp.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
