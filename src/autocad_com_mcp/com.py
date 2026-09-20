@@ -37,6 +37,7 @@ AutoCAD 已移除）。所以插件代码每改一次就得重启 CAD。COM 走 
 """
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -93,9 +94,24 @@ class Acad:
     # ── 底层 ────────────────────────────────────────────────────────────
     @staticmethod
     def _vt(point: Sequence[float]) -> Any:
-        """点 → COM VARIANT 双精度数组。ZoomWindow 要这个格式。"""
+        """
+        点 → COM VARIANT 双精度数组（**3 个元素**）。
+
+        @@ZoomWindow(pt1, pt2)@@ 要 3 元素（AutoCAD 把它当 3D 点）。
+        """
         return wc.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8,
                           [float(point[0]), float(point[1]), 0.0])
+
+    @staticmethod
+    def _vt2(point: Sequence[float]) -> Any:
+        """
+        点 → COM VARIANT 双精度数组（**2 个元素**）。
+
+        ★ @@Layout.SetWindowToPlot(pt1, pt2)@@ 要 2 元素 —— 给 3 个会报
+          "安全数组中的元素数目不正确"（实测）。与 ZoomWindow 不一样，别混用。
+        """
+        return wc.VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8,
+                          [float(point[0]), float(point[1])])
 
     @staticmethod
     def to_hex(handle: str | int) -> str:
@@ -240,6 +256,35 @@ class Acad:
         lst = " ".join('"%s"' % h for h in hexes)
         self.lisp('(foreach h (list %s) (if (handent h) (redraw (handent h) 4)))' % lst)
         return {"unhighlighted": len(hexes)}
+
+    # ── 出图：不在本模块做 ──────────────────────────────────────────────
+    #
+    # 试过 ActiveX 的 Plot 接口，结论是**不如** CurtainWallAI 插件里那条出图管线。
+    # 实测记录（都在这台 AutoCAD 2026 上撞出来的）：
+    #
+    #   官方 SetWindowToPlot 文档：「The units for these values are specified by the
+    #   PaperUnits property.」—— 窗口坐标不是 WCS。
+    #   PlotType=acWindow(4) + SetWindowToPlot(给 WCS)：
+    #       GetWindowToPlot 精确读回、PlotToFile 返回 True，但出图**全白**
+    #       （2560x1440 里非白像素 0 个），换任何媒体都一样。
+    #   PlotType=acView(3) / acLayout(5)：直接设不上（OLE "输入无效"）。
+    #   PlotType=acLimits(2)：也能设，但出图同样全白。
+    #   PlotType=acExtents(1)：能出，但那是**全图** —— 91 张图跨 9 万单位，
+    #       单张图纸在全图里只是一个像素点。
+    #   PlotType=acDisplay(0)：唯一能出内容的，但它打的是**屏幕视口**；
+    #       屏幕 16:9 而图框内框 700x574，内框塞进 16:9 后四周留白，
+    #       像素与坐标的对应关系就不准了 —— 而出图必须能 1:1 反推坐标。
+    #
+    # 还有两个坑（即使改用 acDisplay 也得处理）：
+    #   · PlotToFile 的第二个参数要 PC3 的**完整路径**；给裸名会 E_FAIL。
+    #     本机 APPDATA 下同时装着 AutoCAD 2022/R24.1 和 2026/R25.1，
+    #     递归搜到的第一个可能是**别的版本**的 PC3 —— 必须按版本号取最新。
+    #   · 默认是后台绘图（BACKGROUNDPLOT=2），PlotToFile 立刻返回而文件还没落盘。
+    #     要前台必须设 BACKGROUNDPLOT=0。
+    #
+    # 插件那条管线：2.3 秒/张 + 按内容裁剪，像素<->坐标误差 <=1 像素，
+    # 验证过 91 帧 74 秒 0 失败。**能跑通且更准的东西，不要为了架构好看去重写。**
+    # ───────────────────────────────────────────────────────────────────
 
     # ── 命令 ────────────────────────────────────────────────────────────
     def command(self, text: str) -> dict:

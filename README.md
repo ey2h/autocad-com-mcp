@@ -140,6 +140,47 @@ DXF / ACadSharp 导出的常是**十进制**，`(handent)` 要**十六进制**�
 本项目刻意做得**小而专**：只做"附着到运行中的 AutoCAD、看和指"，
 不做绘图/建模/校验 —— 那些交给上面更全的项目。
 
+
+---
+
+## 不做的事：出图
+
+试过用 ActiveX 的 `Plot` 接口出图，**结论是不做了** —— 不是不能，是不如已有的插件管线准。
+
+实测记录（都在这台 AutoCAD 2026 上撞出来的）：
+
+| PlotType | 结果 |
+|---|---|
+| `acWindow(4)` + `SetWindowToPlot(WCS)` | `GetWindowToPlot` 精确读回、`PlotToFile` 返回 True，**出图全白**（2560x1440 里非白像素 0 个） |
+| `acView(3)` / `acLayout(5)` | 直接设不上（OLE "输入无效"） |
+| `acLimits(2)` | 能设，出图同样全白 |
+| `acExtents(1)` | 能出，但那是**全图** —— 91 张图跨 9 万单位，单张图纸在全图里只是一个像素点 |
+| `acDisplay(0)` | 唯一能出内容的，但它打的是**屏幕视口**；屏幕 16:9 而图框内框 700x574，四周留白后**像素与坐标的对应关系就不准了** |
+
+根因在官方 `SetWindowToPlot` 文档那句：
+
+> The units for these values are specified by the **PaperUnits** property.
+
+—— **窗口坐标不是 WCS**。而 .NET 的 `SetPlotWindowArea` 要 DCS 坐标，也得自己算变换矩阵。
+两条路的"指定矩形出图"都不直观。
+
+**出图留给 CurtainWallAI 插件**：2.3 秒/张 + 按内容裁剪，像素↔坐标误差 ≤1 像素，
+91 帧 74 秒 0 失败。
+
+**能跑通且更准的东西，不要为了架构好看去重写。**
+
+---
+
+## 与 `@CurtainWallAI`@ 的分工
+
+`text
+autocad-com-mcp      看和指（zoom / select / highlight / query）  + 离线分析（构件/型材/剖断线）
+CurtainWallAI 插件   教学面板（WPF 调色板）  +  出图管线（需要 AutoCAD 绘图引擎）
+`
+
+分析逻辑放在 Python 侧的好处：**改判定规则不用编译、不用重启 CAD**。
+C# 侧的 FrameExtract 负责"把 DWG 变成结构化事实"，这是它擅长的（离线、不需要字体、2.7 秒/全图）。
+
 ## 许可
 
 MIT
