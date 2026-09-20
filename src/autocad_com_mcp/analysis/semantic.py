@@ -117,8 +117,31 @@ def match_leaders(leaders, texts, width: float, height: float):
     return pairs
 
 
-def components_of_frame(doc: dict) -> dict:
-    """一帧 → 语义构件清单。"""
+def wps_of_frame(frames_json: str, frame: str):
+    """
+    取某张图的定位点（WP / 工作点）。
+
+    定位点是**现场放线的基准** —— 构件相对它的偏移才是可复用的几何信息
+    （只记绝对坐标的话，图框一移动整条数据就废了）。
+    实测本图 91 张里每张 1~4 个，另有 11 个落在所有图框之外（跨图纸的大装配块里）。
+
+    别名见 FrameExtract 的 WpAliases：定位点 / WP / 工作点 / WP点 / WORKINGPOINT / 节点定位点。
+    各设计院叫法不同，所以那边按名字匹配，这里只管读。
+    """
+    with open(frames_json, encoding="utf-8") as f:
+        fj = json.load(f)
+    return [w for w in (fj.get("wps") or []) if w.get("frame") == frame]
+
+
+def components_of_frame(doc: dict, wps=None) -> dict:
+    """
+    一帧 → 语义构件清单（可选带定位点）。
+
+    传了 wps 时，每个构件的每个实例都会带上：
+        wpIndex  最近的定位点序号
+        wp       定位点的相对坐标
+        wpOffset 构件箭头端相对该定位点的偏移（这才是可复用的几何）
+    """
     W = float(doc.get("widthUnits") or 0)
     H = float(doc.get("heightUnits") or 0)
     texts = doc.get("texts") or []
@@ -130,8 +153,39 @@ def components_of_frame(doc: dict) -> dict:
         nm, pa = split_name_params(p["text"])
         groups[nm].append(dict(p, params=pa))
 
+    # 定位点（相对内框的坐标；没传就退化成绝对坐标）
+    wp_list = []
+    for w in (wps or []):
+        rel = w.get("rel")
+        wp_list.append({"x": w.get("x"), "y": w.get("y"),
+                        "rel": [rel[0], rel[1]] if rel else None,
+                        "block": w.get("block"), "inside": w.get("inside", True)})
+
+    def nearest_wp(tip):
+        """构件的箭头端离哪个定位点最近 —— 就是它归属的定位点。"""
+        if not wp_list:
+            return None, None
+        best, bi = None, -1
+        for i, w in enumerate(wp_list):
+            p = w["rel"] if w["rel"] else [w["x"], w["y"]]
+            if p is None or p[0] is None:
+                continue
+            d = _dist(tip, p)
+            if best is None or d < best:
+                best, bi = d, i
+        if bi < 0:
+            return None, None
+        p = wp_list[bi]["rel"] if wp_list[bi]["rel"] else [wp_list[bi]["x"], wp_list[bi]["y"]]
+        return bi, [round(tip[0] - p[0], 2), round(tip[1] - p[1], 2)]
+
     comps = []
     for nm, ps in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        insts = []
+        for x in ps:
+            wi, off = nearest_wp(x["tip"])
+            insts.append({"tip": x["tip"], "norm":
+                          [round(x["tip"][0] / W, 4), round(x["tip"][1] / H, 4)] if W and H else [],
+                          "wpIndex": wi, "wpOffset": off})
         comps.append({
             "name": nm,
             "count": len(ps),
@@ -139,8 +193,8 @@ def components_of_frame(doc: dict) -> dict:
             "params": ps[0]["params"],
             "textLayer": ps[0]["layer"],
             "positions": [x["tip"] for x in ps],
-            "norm": ([[round(x["tip"][0] / W, 4), round(x["tip"][1] / H, 4)] for x in ps]
-                     if W and H else []),
+            "norm": [i["norm"] for i in insts],
+            "instances": insts,                     # 每个实例带 wpIndex / wpOffset
         })
 
     return {
@@ -153,6 +207,8 @@ def components_of_frame(doc: dict) -> dict:
         "instanceCount": sum(c["count"] for c in comps),
         "components": comps,
         "rawBlockCount": len(doc.get("components") or []),
+        "wpCount": len(wp_list),
+        "wps": wp_list,
     }
 
 
@@ -180,12 +236,24 @@ def find_spec_tables(doc: dict):
     return out
 
 
-def find_break_candidates(doc: dict, max_short_ratio: float = 0.02):
+def find_break_candidates(doc: dict,
+                          min_short: float = 3.0,
+                          max_short_ratio: float = 0.03):
     """
-    找【剖断线】候选 —— 锯齿折线，在图上表现为"很窄很长"的多段线。
+    找【剖断线】候选 —— 锯齿折线。
 
-    ★ 只给候选、不下结论：用户明确要求"选出来给他核对"。
-      剖断线没有硬指标（本图里 FH 层的那几条最像，有 4 条）。
+    ## 判据（用户核对确认后定下的）
+
+    剖断线在图上表现为：**有一定宽度 + 很长**的一条折线。
+    本实例里是 4 条 8x125 的，在图层 @@FH@@ 上。
+
+    ★ 关键是要**排除"只有 1 个单位宽的直线"**：
+      最初只按长宽比排序，结果把 10 条 @@PJ@@ 层 1x131 的线排到了前面
+      （长宽比 131 更大）—— 那些是引线/尺寸界线之类的**直线**，不是锯齿。
+      锯齿是有真实宽度的（8 单位），所以加一个 min_short 下限就能把它们分开。
+
+    ★ 仍然只给候选、不下结论：剖断线没有硬性指标，必须人核对。
+      拿到 handle 后用 acad_select / acad_highlight 在 CAD 里选中给人看。
     """
     W = float(doc.get("widthUnits") or 1)
     H = float(doc.get("heightUnits") or 1)
@@ -198,7 +266,7 @@ def find_break_candidates(doc: dict, max_short_ratio: float = 0.02):
             continue
         w, h = r[2] - r[0], r[3] - r[1]
         short, long_ = min(w, h), max(w, h)
-        if long_ < 20 or short <= 0:
+        if long_ < 20 or short < min_short:
             continue
         if short > max_short_ratio * max(W, H):
             continue
@@ -206,7 +274,8 @@ def find_break_candidates(doc: dict, max_short_ratio: float = 0.02):
                     "rel": [round(v, 2) for v in r],
                     "size": [round(w, 1), round(h, 1)],
                     "ratio": round(long_ / short, 1)})
-    out.sort(key=lambda x: -x["ratio"])
+    # 排序：先按面积（锯齿的"有宽度"特征更实在），再按长宽比
+    out.sort(key=lambda x: (-(x["size"][0] * x["size"][1]), -x["ratio"]))
     return out
 
 

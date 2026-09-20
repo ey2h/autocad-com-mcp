@@ -195,7 +195,26 @@ def dwg_extract_frames(dwg_path: str, out_dir: str,
 
 
 @mcp.tool()
-def dwg_components(data_dir: str, frame: str) -> str:
+def dwg_wps(frames_json: str, frame: str = "") -> str:
+    """读定位点（WP / 工作点）。
+
+    定位点是**现场放线的基准**。别名见 FrameExtract 的 WpAliases：
+    定位点 / WP / 工作点 / WP点 / WORKINGPOINT / 节点定位点（各设计院叫法不同）。
+
+    实测本图 91 张里每张 1~4 个，另有 11 个落在所有图框之外
+    （在跨图纸的大装配块里，用于完整性校验：定位点全都落在图框内才说明没漏图框）。
+    """
+    import json as _json
+    with open(frames_json, encoding="utf-8") as f:
+        fj = _json.load(f)
+    w = fj.get("wps") or []
+    if frame:
+        w = [x for x in w if x.get("frame") == frame]
+    return _dump({"total": len(w), "wps": w})
+
+
+@mcp.tool()
+def dwg_components(data_dir: str, frame: str, frames_json: str = "") -> str:
     """提取一张图的【语义构件清单】。
 
     ★ 构件清单 = 引线分组，与块无关：
@@ -203,12 +222,17 @@ def dwg_components(data_dir: str, frame: str) -> str:
         构件位置 = 引线箭头端
         实例数   = 该标注的箭头个数（一条标注挂 N 个箭头 = N 个同类实例）
 
-    实测 JD-201：425 条块记录 -> 11 类构件 / 12 个实例。
+    实测 JD-201：425 条块记录 -> 15 类构件 / 30 个实例。
     注解文字里的参数会被拆出来（"铝合金插芯 L=50mm" -> {L: 50mm}）。
+
+    给了 frames_json 时，每个实例还会带上它对应的**定位点**：
+        wpIndex     最近的定位点序号
+        wpOffset    该实例相对定位点的偏移 —— 这才是可复用的几何
     """
     from .analysis import semantic as S
     doc = S.load_frame(data_dir, frame)
-    out = S.components_of_frame(doc)
+    wps = S.wps_of_frame(frames_json, frame) if frames_json else []
+    out = S.components_of_frame(doc, wps)
     out["specTables"] = S.find_spec_tables(doc)
     return _dump(out)
 
